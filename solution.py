@@ -48,11 +48,22 @@ import pandas as pd
 # Every tuneable number lives here. Fewer is better.
 # --------------------------------------------------------------------------- #
 
-PARAMS = {
-    "vol_days":    250,     # lookback for the volatility estimate
-    "tilt_size":   0.06,    # how far a 1-sigma signal moves a weight
-    "trade_speed": 0.10,    # fraction of the gap to yesterday we close per day
+# A (Kendall) owns SIG_PARAMS. Every key starts with "sig_".
+SIG_PARAMS = {
+    "sig_growth":     1.0,   # overweight on each of the two equity legs
+    "sig_income":     2.0,   # underweight on bonds and on cash
+    "sig_gold":       2.0,   # overweight on gold, the only real diversifier
+    "sig_yield_days": 750,   # lookback for "are SA bonds historically cheap?"
 }
+
+# B (Akhona) owns EXE_PARAMS. Every key starts with "exe_".
+EXE_PARAMS = {
+    "exe_tilt":  0.06,        # how far a 1-sigma signal moves a weight
+    "exe_speed": 0.10,        # fraction of the gap to yesterday we close per day
+}
+
+# FROZEN. The harness reads len(PARAMS). Neither of us edits this line.
+PARAMS = {**SIG_PARAMS, **EXE_PARAMS}
 
 # The rules, restated locally so this file reads on its own.
 ACTIVE_BAND = 0.10       # per asset, distance from benchmark
@@ -92,16 +103,43 @@ GOLD_CAP = 0.10
 def build_signal(hist, params) -> pd.Series:
     """Score per asset. Positive means overweight, negative means underweight.
 
-    Naive placeholder: inverse volatility. Lower-volatility assets score
-    higher. That is a statement about risk, not about return -- replace it.
-    """
-    vol = hist.returns.tail(int(params["vol_days"])).std() * np.sqrt(252)
-    score = (1.0 / vol.replace(0.0, np.nan)).reindex(hist.assets).fillna(0.0)
+    One structural view, plus one valuation check on the leg most likely to be
+    wrong.
 
-    # standardise so the signal scale is stable through time
-    if score.std() > 0:
-        score = (score - score.mean()) / score.std()
-    return score
+    The view. The benchmark holds 32.5% in bonds and cash -- the two assets that
+    have lagged it in most calendar years -- and 2.5% in gold, the only asset
+    here that is negatively correlated with SA equity, bonds and property. So
+    fund the equities and gold out of the income block. Gold runs all the way to
+    its 10% cap, because a cap is the only good reason not to hold more of the
+    one thing that actually diversifies. Property gets no view: it is the most
+    expensive line to trade at 35bps and the one with the worst tail.
+
+    The check. A high bond yield is a high expected return, so the bond
+    underweight is the leg that valuation can veto. When the SA 10-year sits a
+    standard deviation or more above its own three-year average, the underweight
+    fades to nothing. It only ever shrinks the position, never reverses it --
+    this is position sizing, not a call on where yields go next.
+    """
+    growth = float(params["sig_growth"])
+    income = float(params["sig_income"])
+    gold = float(params["sig_gold"])
+
+    # how cheap are SA bonds against their own recent history, in sigmas
+    yields = hist.macro["sa_10y"].tail(int(params["sig_yield_days"])).dropna()
+    cheap = 0.0
+    if len(yields) >= 250 and yields.std() > 0:
+        cheap = float((yields.iloc[-1] - yields.mean()) / yields.std())
+    bond_conviction = min(max(1.0 - cheap, 0.0), 1.0)
+
+    view = {
+        "SA_EQUITY":     growth,
+        "GLOBAL_EQUITY": growth,
+        "SA_BONDS":     -income * bond_conviction,
+        "SA_CASH":      -income,
+        "SA_PROPERTY":   0.0,
+        "GOLD":          gold,
+    }
+    return pd.Series({a: view.get(a, 0.0) for a in hist.assets}, dtype=float)
 
 
 def make_legal(weights: pd.Series, hist) -> pd.Series:
@@ -157,17 +195,14 @@ def generate_weights(hist, prev_weights, params):
     """Return the six portfolio weights to hold on hist.date."""
     bm = hist.benchmark
 
-    # not enough history to estimate anything: sit on the benchmark
     if len(hist.returns) < 260:
         return bm.to_dict()
 
-    # 1. signal -> target weights around the benchmark
     signal = build_signal(hist, params)
-    target = make_legal(bm + float(params["tilt_size"]) * signal, hist)
+    target = make_legal(bm + float(params["exe_tilt"]) * signal, hist)
 
-    # 2. trade gradually toward the target rather than jumping to it
     prev = prev_weights.reindex(hist.assets)
-    w = prev + float(params["trade_speed"]) * (target - prev)
+    w = prev + float(params["exe_speed"]) * (target - prev)
 
     return make_legal(w, hist).to_dict()
 
