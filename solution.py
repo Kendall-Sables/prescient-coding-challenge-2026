@@ -50,7 +50,10 @@ import pandas as pd
 
 # A (Kendall) owns SIG_PARAMS. Every key starts with "sig_".
 SIG_PARAMS = {
-    "sig_vol_days": 250,      # lookback for the volatility estimate
+    "sig_growth":     1.0,   # overweight on each of the two equity legs
+    "sig_income":     2.0,   # underweight on bonds and on cash
+    "sig_gold":       2.0,   # overweight on gold, the only real diversifier
+    "sig_yield_days": 750,   # lookback for "are SA bonds historically cheap?"
 }
 
 # B (Akhona) owns EXE_PARAMS. Every key starts with "exe_".
@@ -100,16 +103,43 @@ GOLD_CAP = 0.10
 def build_signal(hist, params) -> pd.Series:
     """Score per asset. Positive means overweight, negative means underweight.
 
-    Naive placeholder: inverse volatility. Lower-volatility assets score
-    higher. That is a statement about risk, not about return -- replace it.
-    """
-    vol = hist.returns.tail(int(params["sig_vol_days"])).std() * np.sqrt(252)
-    score = (1.0 / vol.replace(0.0, np.nan)).reindex(hist.assets).fillna(0.0)
+    One structural view, plus one valuation check on the leg most likely to be
+    wrong.
 
-    # standardise so the signal scale is stable through time
-    if score.std() > 0:
-        score = (score - score.mean()) / score.std()
-    return score
+    The view. The benchmark holds 32.5% in bonds and cash -- the two assets that
+    have lagged it in most calendar years -- and 2.5% in gold, the only asset
+    here that is negatively correlated with SA equity, bonds and property. So
+    fund the equities and gold out of the income block. Gold runs all the way to
+    its 10% cap, because a cap is the only good reason not to hold more of the
+    one thing that actually diversifies. Property gets no view: it is the most
+    expensive line to trade at 35bps and the one with the worst tail.
+
+    The check. A high bond yield is a high expected return, so the bond
+    underweight is the leg that valuation can veto. When the SA 10-year sits a
+    standard deviation or more above its own three-year average, the underweight
+    fades to nothing. It only ever shrinks the position, never reverses it --
+    this is position sizing, not a call on where yields go next.
+    """
+    growth = float(params["sig_growth"])
+    income = float(params["sig_income"])
+    gold = float(params["sig_gold"])
+
+    # how cheap are SA bonds against their own recent history, in sigmas
+    yields = hist.macro["sa_10y"].tail(int(params["sig_yield_days"])).dropna()
+    cheap = 0.0
+    if len(yields) >= 250 and yields.std() > 0:
+        cheap = float((yields.iloc[-1] - yields.mean()) / yields.std())
+    bond_conviction = min(max(1.0 - cheap, 0.0), 1.0)
+
+    view = {
+        "SA_EQUITY":     growth,
+        "GLOBAL_EQUITY": growth,
+        "SA_BONDS":     -income * bond_conviction,
+        "SA_CASH":      -income,
+        "SA_PROPERTY":   0.0,
+        "GOLD":          gold,
+    }
+    return pd.Series({a: view.get(a, 0.0) for a in hist.assets}, dtype=float)
 
 
 def make_legal(weights: pd.Series, hist) -> pd.Series:
