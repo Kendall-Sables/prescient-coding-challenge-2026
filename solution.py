@@ -48,11 +48,19 @@ import pandas as pd
 # Every tuneable number lives here. Fewer is better.
 # --------------------------------------------------------------------------- #
 
-PARAMS = {
-    "vol_days":    250,     # lookback for the volatility estimate
-    "tilt_size":   0.06,    # how far a 1-sigma signal moves a weight
-    "trade_speed": 0.10,    # fraction of the gap to yesterday we close per day
+# A (Kendall) owns SIG_PARAMS. Every key starts with "sig_".
+SIG_PARAMS = {
+    "sig_vol_days": 250,      # lookback for the volatility estimate
 }
+
+# B (Akhona) owns EXE_PARAMS. Every key starts with "exe_".
+EXE_PARAMS = {
+    "exe_tilt":  0.06,        # how far a 1-sigma signal moves a weight
+    "exe_speed": 0.10,        # fraction of the gap to yesterday we close per day
+}
+
+# FROZEN. The harness reads len(PARAMS). Neither of us edits this line.
+PARAMS = {**SIG_PARAMS, **EXE_PARAMS}
 
 # The rules, restated locally so this file reads on its own.
 ACTIVE_BAND = 0.10       # per asset, distance from benchmark
@@ -95,7 +103,7 @@ def build_signal(hist, params) -> pd.Series:
     Naive placeholder: inverse volatility. Lower-volatility assets score
     higher. That is a statement about risk, not about return -- replace it.
     """
-    vol = hist.returns.tail(int(params["vol_days"])).std() * np.sqrt(252)
+    vol = hist.returns.tail(int(params["sig_vol_days"])).std() * np.sqrt(252)
     score = (1.0 / vol.replace(0.0, np.nan)).reindex(hist.assets).fillna(0.0)
 
     # standardise so the signal scale is stable through time
@@ -163,11 +171,11 @@ def generate_weights(hist, prev_weights, params):
 
     # 1. signal -> target weights around the benchmark
     signal = build_signal(hist, params)
-    target = make_legal(bm + float(params["tilt_size"]) * signal, hist)
+    target = make_legal(bm + float(params["exe_tilt"]) * signal, hist)
 
     # 2. trade gradually toward the target rather than jumping to it
     prev = prev_weights.reindex(hist.assets)
-    w = prev + float(params["trade_speed"]) * (target - prev)
+    w = prev + float(params["exe_speed"]) * (target - prev)
 
     return make_legal(w, hist).to_dict()
 
