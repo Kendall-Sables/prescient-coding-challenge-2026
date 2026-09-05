@@ -195,15 +195,12 @@ def generate_weights(hist, prev_weights, params):
     """Return the six portfolio weights to hold on hist.date."""
     bm = hist.benchmark
 
-    # not enough history to estimate anything: sit on the benchmark
     if len(hist.returns) < 260:
         return bm.to_dict()
 
-    # 1. signal -> target weights around the benchmark
     signal = build_signal(hist, params)
     target = make_legal(bm + float(params["exe_tilt"]) * signal, hist)
 
-    # 2. trade gradually toward the target rather than jumping to it
     prev = prev_weights.reindex(hist.assets)
     w = prev + float(params["exe_speed"]) * (target - prev)
 
